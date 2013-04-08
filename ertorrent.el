@@ -6,7 +6,7 @@
 ;; URL:        https://github.com/spacebat/ertorrent
 ;; Created:    07 Apr 2013
 ;; Keywords:   convenience, lisp
-;; Version:    0.1
+;; Version:    0.2
 ;; Package-Requires: (tabulated-list xrc)
 
 ;; This file is not part of GNU Emacs.
@@ -48,55 +48,112 @@
 (defvar ertorrent-xrc-endpoint nil)
 (defvar ertorrent-xrc-caller nil)
 
+(defvar ertorrent-torrent-data nil
+  "A hash table of torrents keyed by local-id")
+
+(defvar ertorrent-tablist-fields nil
+  "The torrent fields to tabulate")
+
+(setq ertorrent-tablist-fields
+      (list
+       (list :name "Torrent Name"
+             :width 60
+             :sort (lambda (a b)
+                     (cl-flet ((name (entry)
+                                     (downcase (aref (cadr entry) 0))))
+                       (string< (name a) (name b))))
+             :func (lambda (torrent)
+                     (ertorrent-torrent-val torrent 'name)))
+
+       (list :name "Status"
+             :width 10
+             :sort t
+             :func 'ertorrent-torrent-status-string)
+
+       (list :name "Done"
+             :width 10
+             :sort (lambda (a b)
+                     (cl-flet ((done (entry)
+                                     (ertorrent-torrent-percent-complete
+                                      (gethash (car entry) ertorrent-torrent-data))))
+                       (< (done a) (done b))))
+             :func (lambda (torrent)
+                     (format "%s" (ertorrent-torrent-percent-complete torrent))))
+
+       (list :name "Remain"
+             :width 10
+             :sort (lambda (a b)
+                     (cl-flet ((remain (entry)
+                                       (ertorrent-torrent-val
+                                        (gethash (car entry) ertorrent-torrent-data)
+                                        'left-bytes)))
+                       (< (remain a) (remain b))))
+             :props '(:right-align t)
+             :func (lambda (torrent)
+                     (format "%s" (ertorrent-torrent-val torrent 'left-bytes))))
+       ))
+
+(defun ertorrent-tablist-field-spec (field)
+  "Produce a list from an element of from `ertorrent-tablist-fields' suitable for initializing a column spec in `tabulated-list-format'"
+  (loop for key in '(:name :width :sort :props)
+        for val = (plist-get field key)
+        collect val))
+
+(defun ertorrent-tablist-field-value (field torrent)
+  "Return the value for field given torrent."
+  (funcall (plist-get field :func) torrent))
+
+(defun ertorrent-tablist-vector (torrent)
+  "Produce a vector for an entry to be inserted in `tabulated-list-entries'"
+  (apply 'vector (loop for field in ertorrent-tablist-fields
+                       collect (funcall (plist-get field :func) torrent))))
+
+(defun* ertorrent-update-data (&key (context "main"))
+  "Create and populate a hash table with torrents keyed by local-id, assign it to ertorrent-torrent-data, return the list."
+  (let ((table (make-hash-table :test 'equal))
+        (result (ertorrent-get-list ertorrent-xrc-caller :context context)))
+    (dolist (torrent result)
+      (puthash (ertorrent-torrent-val torrent 'local-id) torrent table))
+    (setq ertorrent-torrent-data table)
+    result))
+
 (defun ertorrent--list-torrents ()
   "List of torrents in `tabulated-list-mode' format on an rtorrent instance."
-  ;; '((meh ["one" "two" "three" "four"]))
-  (message "buffer is %s" (current-buffer))
-  (message "ertorrent-xrc-endpoint is %s" ertorrent-xrc-endpoint)
-  (message "ertorrent-xrc-caller is %s" ertorrent-xrc-caller)
   
-  (loop for torrent in (ertorrent-get-list ertorrent-xrc-caller :context "main")
-        for hash = (ertorrent-torrent-val torrent 'hash)
-        if hash
-        collect
-        (list hash
-              (vector (ertorrent-torrent-val torrent 'name)
-                      (ertorrent-torrent-status-string torrent)
-                      (format "%s" (ertorrent-torrent-percent-complete torrent))
-                      (format "%s" (ertorrent-torrent-val torrent 'left-bytes)))))
-  )
+  (loop for torrent in (ertorrent-update-data :context "main")
+        for local-id = (ertorrent-torrent-val torrent 'local-id)
+        if local-id
+        collect (list local-id (ertorrent-tablist-vector torrent))))
 
 (define-derived-mode
   ertorrent-list-mode tabulated-list-mode "RTorrent torrent list"
   "Major mode for listing torrents on an rtorrent instance."
   (setq tabulated-list-entries 'ertorrent--list-torrents
-        tabulated-list-format [("Torrent Name" 60 nil)
-                               ("Status" 10 nil)
-                               ("Done" 10 nil)
-                               ("Remain" 10 nil)
-                               ;; ("Size" 10 nil)
-                               ;; ("Down" 10 nil)
-                               ;; ("Up" 10 nil)
-                               ;; ("Seeded" 10 nil)
-                               ;; ("Ratio" 10 nil)
-                               ;; ("Peers" 10 nil)
-                               ])
+        tabulated-list-format (apply 'vector (mapcar 'ertorrent-tablist-field-spec ertorrent-tablist-fields))
+        ;; [("Torrent Name" 60 nil)
+        ;;  ("Status" 10 nil)
+        ;;  ("Done" 10 nil)
+        ;;  ("Remain" 10 nil)
+        ;;  ;; ("Size" 10 nil)
+        ;;  ;; ("Down" 10 nil)
+        ;;  ;; ("Up" 10 nil)
+        ;;  ;; ("Seeded" 10 nil)
+        ;;  ;; ("Ratio" 10 nil)
+        ;;  ;; ("Peers" 10 nil)
+        ;;  ]
+        )
   (tabulated-list-init-header))
 
 ;;;###autoload
 (defun ertorrent-list-torrents (&optional url)
   "List torrents on an rtorrent instance."
   (interactive
-   ;; "sRTorrent URL: "
-   (list (read-string "RTorrent URL: " ertorrent-default-url))
-   )
+   (list (read-string "RTorrent URL: " ertorrent-default-url)))
+
   (with-current-buffer (get-buffer-create (format "*rtorrent %s*" url))
     (setq lexical-binding t)
     (setq ertorrent-xrc-endpoint (xrc-make-endpoint :url url))
     (setq ertorrent-xrc-caller (xrc-caller ertorrent-xrc-endpoint))
-    (message "in buffer %s" (current-buffer))
-    (message "set ertorrent-xrc-endpoint to %s" ertorrent-xrc-endpoint)
-    (message "set ertorrent-xrc-caller to %s" ertorrent-xrc-caller)
     (ertorrent-list-mode)
     (tabulated-list-print)
     (switch-to-buffer (current-buffer))))
